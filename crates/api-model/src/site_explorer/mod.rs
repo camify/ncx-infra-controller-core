@@ -667,6 +667,27 @@ impl ExploredManagedHost {
     }
 }
 
+/// A combination of DPU and host that was discovered via Site Exploration
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct ExploredManagedSwitch {
+    /// The Switch's BMC IP
+    pub bmc_ip: IpAddr,
+    // Host mac address
+    pub nv_os_mac_addresses: Vec<MacAddress>,
+    /// Exploration report for this switch endpoint
+    pub report: EndpointExplorationReport,
+}
+
+impl ExploredManagedSwitch {
+    pub fn bmc_info(&self) -> BmcInfo {
+        BmcInfo {
+            ip: Some(self.bmc_ip.to_string()),
+            ..Default::default()
+        }
+    }
+}
+
 /// Serialization methods for types which support FromStr/Display
 mod serialize_option_display {
     use std::fmt::Display;
@@ -927,7 +948,7 @@ impl EndpointExplorationReport {
     //TODO: refactor for common code with generate_power_shelf_id
     /// Tries to generate and store a MachineId for the discovered endpoint if
     /// enough data for generation is available
-    pub fn generate_switch_id(&mut self) -> ModelResult<Option<&SwitchId>> {
+    pub fn generate_switch_id(&mut self) -> ModelResult<Option<SwitchId>> {
         if let Some(serial_number) = self
             .systems
             .first()
@@ -968,8 +989,8 @@ impl EndpointExplorationReport {
                     MissingHardwareInfo::Serial,
                 ))
             })?;
-
-            Ok(Some(self.switch_id.insert(switch_id)))
+            self.switch_id = Some(switch_id);
+            Ok(self.switch_id)
         } else {
             Err(ModelError::HardwareInfo(
                 HardwareInfoError::MissingHardwareInfo(MissingHardwareInfo::Serial),

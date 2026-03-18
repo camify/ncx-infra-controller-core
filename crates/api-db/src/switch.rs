@@ -22,7 +22,9 @@ use chrono::prelude::*;
 use config_version::{ConfigVersion, Versioned};
 use futures::StreamExt;
 use model::controller_outcome::PersistentStateHandlerOutcome;
-use model::switch::{NewSwitch, Switch, SwitchControllerState};
+use model::switch::{
+    FirmwareUpgradeStatus, NewSwitch, Switch, SwitchControllerState, SwitchReprovisionRequest,
+};
 use sqlx::PgConnection;
 
 use crate::{
@@ -81,6 +83,8 @@ pub async fn create(txn: &mut PgConnection, new_switch: &NewSwitch) -> DatabaseR
             version,
         },
         controller_state_outcome: None,
+        switch_reprovisioning_requested: None,
+        firmware_upgrade_status: None,
     })
 }
 
@@ -126,6 +130,18 @@ pub async fn find_by_id(txn: &mut PgConnection, id: &SwitchId) -> DatabaseResult
             ),
         ))
     }
+}
+
+pub async fn find_by_host_mac_address(
+    txn: &mut PgConnection,
+    host_mac_address: &MacAddress,
+) -> DatabaseResult<Option<Switch>> {
+    let query = sqlx::query_as::<_, Switch>("SELECT * FROM switches WHERE host_mac_address = $1");
+    query
+        .bind(host_mac_address)
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::new("find_by_host_mac_address", e))
 }
 
 pub async fn find_all(txn: &mut PgConnection) -> DatabaseResult<Vec<SwitchId>> {
@@ -204,6 +220,62 @@ pub async fn update_controller_state_outcome(
         .await
         .map_err(|e| DatabaseError::new("update_controller_state_outcome", e))?;
 
+    Ok(())
+}
+
+/// Sets switch_reprovisioning_requested on the switch. Can be called from any state machine or
+/// service. When the switch is in Ready state, the switch state controller will observe the flag
+/// and transition to ReProvisioning::Start.
+pub async fn set_switch_reprovisioning_requested(
+    txn: &mut PgConnection,
+    switch_id: SwitchId,
+    initiator: &str,
+) -> DatabaseResult<()> {
+    let req = SwitchReprovisionRequest {
+        requested_at: Utc::now(),
+        initiator: initiator.to_string(),
+    };
+    let query =
+        "UPDATE switches SET switch_reprovisioning_requested = $1 WHERE id = $2 RETURNING id";
+    sqlx::query_as::<_, SwitchId>(query)
+        .bind(sqlx::types::Json(req))
+        .bind(switch_id)
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::new("set_switch_reprovisioning_requested", e))?;
+    Ok(())
+}
+
+/// Clears switch_reprovisioning_requested. Typically called when reprovisioning completes or is
+/// cancelled.
+pub async fn clear_switch_reprovisioning_requested(
+    txn: &mut PgConnection,
+    switch_id: SwitchId,
+) -> DatabaseResult<()> {
+    let query =
+        "UPDATE switches SET switch_reprovisioning_requested = NULL WHERE id = $1 RETURNING id";
+    sqlx::query_as::<_, SwitchId>(query)
+        .bind(switch_id)
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::new("clear_switch_reprovisioning_requested", e))?;
+    Ok(())
+}
+
+/// Sets firmware_upgrade_status on the switch. Call from any state machine or service to report
+/// upgrade progress. WaitFirmwareUpdateCompletion reads this: Completed → Ready, Failed → Error.
+pub async fn update_firmware_upgrade_status(
+    txn: &mut PgConnection,
+    switch_id: SwitchId,
+    status: Option<&FirmwareUpgradeStatus>,
+) -> DatabaseResult<()> {
+    let query = "UPDATE switches SET firmware_upgrade_status = $1 WHERE id = $2 RETURNING id";
+    sqlx::query_as::<_, SwitchId>(query)
+        .bind(status.map(|s| sqlx::types::Json(s.clone())))
+        .bind(switch_id)
+        .fetch_optional(txn)
+        .await
+        .map_err(|e| DatabaseError::new("update_firmware_upgrade_status", e))?;
     Ok(())
 }
 
